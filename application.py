@@ -1,77 +1,84 @@
 from flask import Flask, request, jsonify
-import uuid, json, os
-from datetime import datetime
+import json
 import requests
+from datetime import datetime
 
 app = Flask(__name__)
-LOG_FILE = "ledger_log.json"
+
+# Load config
+with open("config.json") as f:
+    CONFIG = json.load(f)
+
 FLAGGED_FILE = "flagged_messages.json"
+LOG_FILE = "ledger_log.json"
 
+
+# Helper: Check OpenSanctions for match
 def check_opensanctions(name):
+    api_key = CONFIG.get("opensanctions_api_key")
+    if not api_key:
+        return False
+
+    url = f"https://api.opensanctions.org/match?api_key={api_key}"
+    response = requests.post(url, json={"q": name})
+    data = response.json()
+    return any(r.get("match", False) for r in data.get("results", []))
+
+
+# Helper: Append to JSON log file
+def append_to_log(filename, data):
     try:
-        with open("config.json") as f:
-            key = json.load(f)["opensanctions_api_key"]
-        res = requests.get(
-            f"https://api.opensanctions.org/match?q={name}",
-            headers={"Authorization": f"ApiKey {key}"}
-        )
-        data = res.json()
-        if data.get("match") and data["match"].get("score", 0) > 0.85:
-            return data["match"]["entity"]["name"]
-    except Exception as e:
-        print("Sanctions check failed:", e)
-    return None
+        with open(filename, "r") as f:
+            logs = json.load(f)
+    except FileNotFoundError:
+        logs = []
+    logs.append(data)
+    with open(filename, "w") as f:
+        json.dump(logs, f, indent=2)
 
-def log_to_file(entry):
-    data = []
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE) as f:
-            data = json.load(f)
-    data.append(entry)
-    with open(LOG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
 
-@app.route("/ledger-core/api/mt799", methods=["POST"])
-def mt799():
-    data = request.form
-    flagged = []
-    for field in ["sender", "receiver"]:
-        res = check_opensanctions(data.get(field, ""))
-        if res:
-            flagged.append(f"{field}: {res}")
-    entry = {
-        "id": str(uuid.uuid4()),
-        "type": "MT799",
-        "timestamp": datetime.utcnow().isoformat(),
-        "data": data.to_dict(),
-        "flags": ["OpenSanctions"] if flagged else [],
-        "matches": flagged
-    }
-    log_to_file(entry)
-    return jsonify({"message": "MT799 logged", "screening": flagged}), 200
+@app.route("/api/ping")
+def ping():
+    return jsonify({"status": "ok"})
 
-@app.route("/ledger-core/api/iso20022", methods=["POST"])
-def iso20022():
-    data = request.form
-    flagged = []
-    for field in ["debtorName", "creditorName"]:
-        res = check_opensanctions(data.get(field, ""))
-        if res:
-            flagged.append(f"{field}: {res}")
-    entry = {
-        "id": str(uuid.uuid4()),
-        "type": "ISO20022",
-        "timestamp": datetime.utcnow().isoformat(),
-        "data": data.to_dict(),
-        "flags": ["OpenSanctions"] if flagged else [],
-        "matches": flagged
-    }
-    log_to_file(entry)
-    return jsonify({"message": "ISO20022 logged", "screening": flagged}), 200
 
-@app.route("/")
-def index():
-    return "WealthBT Ledger Backend Online"
+@app.route("/api/mt799", methods=["POST"])
+def submit_mt799():
+    data = request.form.to_dict()
+    data["timestamp"] = datetime.utcnow().isoformat()
+
+    # Sanction check
+    flagged = any([
+        check_opensanctions(data.get("sender_bic", "")),
+        check_opensanctions(data.get("receiver_bic", ""))
+    ])
+    data["flagged"] = flagged
+
+    append_to_log(LOG_FILE, data)
+    if flagged:
+        append_to_log(FLAGGED_FILE, data)
+
+    return jsonify({"status": "received", "flagged": flagged})
+
+
+@app.route("/api/iso20022", methods=["POST"])
+def submit_iso20022():
+    data = request.form.to_dict()
+    data["timestamp"] = datetime.utcnow().isoformat()
+
+    # Sanction check
+    flagged = any([
+        check_opensanctions(data.get("debtor_name", "")),
+        check_opensanctions(data.get("creditor_name", ""))
+    ])
+    data["flagged"] = flagged
+
+    append_to_log(LOG_FILE, data)
+    if flagged:
+        append_to_log(FLAGGED_FILE, data)
+
+    return jsonify({"status": "received", "flagged": flagged})
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True)
