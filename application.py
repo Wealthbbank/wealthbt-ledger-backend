@@ -1,84 +1,45 @@
 from flask import Flask, request, jsonify
-import json
 import requests
-from datetime import datetime
+import json
+
+# Load OpenSanctions API key from config
+with open("config.json") as f:
+    config = json.load(f)
+
+OPENSANCTIONS_API_KEY = config.get("opensanctions_api_key")
 
 app = Flask(__name__)
 
-# Load config
-with open("config.json") as f:
-    CONFIG = json.load(f)
-
-FLAGGED_FILE = "flagged_messages.json"
-LOG_FILE = "ledger_log.json"
-
-
-# Helper: Check OpenSanctions for match
-def check_opensanctions(name):
-    api_key = CONFIG.get("opensanctions_api_key")
-    if not api_key:
+# Flagging logic using OpenSanctions
+def check_sanctions(name):
+    headers = {"Authorization": f"Bearer {OPENSANCTIONS_API_KEY}"}
+    url = f"https://api.opensanctions.org/match?q={name}"
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("match", {}).get("strength", 0) > 0.8
+    except Exception as e:
+        print(f"Sanctions API error: {e}")
         return False
 
-    url = f"https://api.opensanctions.org/match?api_key={api_key}"
-    response = requests.post(url, json={"q": name})
-    data = response.json()
-    return any(r.get("match", False) for r in data.get("results", []))
-
-
-# Helper: Append to JSON log file
-def append_to_log(filename, data):
-    try:
-        with open(filename, "r") as f:
-            logs = json.load(f)
-    except FileNotFoundError:
-        logs = []
-    logs.append(data)
-    with open(filename, "w") as f:
-        json.dump(logs, f, indent=2)
-
-
-@app.route("/api/ping")
-def ping():
-    return jsonify({"status": "ok"})
-
-
 @app.route("/api/mt799", methods=["POST"])
-def submit_mt799():
-    data = request.form.to_dict()
-    data["timestamp"] = datetime.utcnow().isoformat()
-
-    # Sanction check
-    flagged = any([
-        check_opensanctions(data.get("sender_bic", "")),
-        check_opensanctions(data.get("receiver_bic", ""))
-    ])
-    data["flagged"] = flagged
-
-    append_to_log(LOG_FILE, data)
-    if flagged:
-        append_to_log(FLAGGED_FILE, data)
-
-    return jsonify({"status": "received", "flagged": flagged})
-
+def process_mt799():
+    data = request.json
+    flagged = (
+        check_sanctions(data.get("sender")) or
+        check_sanctions(data.get("receiver"))
+    )
+    return jsonify({"flagged": flagged, "status": "received"})
 
 @app.route("/api/iso20022", methods=["POST"])
-def submit_iso20022():
-    data = request.form.to_dict()
-    data["timestamp"] = datetime.utcnow().isoformat()
-
-    # Sanction check
-    flagged = any([
-        check_opensanctions(data.get("debtor_name", "")),
-        check_opensanctions(data.get("creditor_name", ""))
-    ])
-    data["flagged"] = flagged
-
-    append_to_log(LOG_FILE, data)
-    if flagged:
-        append_to_log(FLAGGED_FILE, data)
-
-    return jsonify({"status": "received", "flagged": flagged})
-
+def process_iso20022():
+    data = request.json
+    flagged = (
+        check_sanctions(data.get("debtorName")) or
+        check_sanctions(data.get("creditorName"))
+    )
+    return jsonify({"flagged": flagged, "status": "received"})
 
 if __name__ == "__main__":
     app.run(debug=True)
