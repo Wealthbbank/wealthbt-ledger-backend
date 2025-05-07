@@ -1,2 +1,5 @@
-flask
+Flask
 requests
+Jinja2
+gunicorn
+
