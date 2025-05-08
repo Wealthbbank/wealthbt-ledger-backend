@@ -2,4 +2,4 @@ Flask
 requests
 Jinja2
 gunicorn
-
+flask-cors
