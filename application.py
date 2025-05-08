@@ -25,7 +25,7 @@ def save_flagged(data):
 
 def check_sanctions(name):
     api_key = config.get("opensanctions_api_key", "")
-    url = f"https://api.opensanctions.org/match?api_key={api_key}"
+    url = f"https://api.opensanctions.org/v1/match?api_key={api_key}"
     payload = {"name": name}
     try:
         res = requests.post(url, json=payload, timeout=5)
